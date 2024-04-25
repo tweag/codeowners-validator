@@ -46,7 +46,7 @@ type ValidOwner struct {
 	checkScopes          bool
 	orgMembers           *map[string]struct{}
 	orgName              string
-	orgTeams             []*github.Team
+	repoTeams            []*github.Team
 	orgRepoName          string
 	ignOwners            map[string]struct{}
 	allowUnownedPatterns bool
@@ -170,18 +170,18 @@ func (v *ValidOwner) selectValidateFn(name string) func(context.Context, string)
 	}
 }
 
-func (v *ValidOwner) initOrgListTeams(ctx context.Context) *validateError {
+func (v *ValidOwner) initRepoTeams(ctx context.Context) *validateError {
 	var teams []*github.Team
 	req := &github.ListOptions{
 		PerPage: 100,
 	}
 	for {
-		resultPage, resp, err := v.ghClient.Teams.ListTeams(ctx, v.orgName, req)
+		resultPage, resp, err := v.ghClient.Repositories.ListTeams(ctx, v.orgName, v.orgRepoName, req)
 		if err != nil { // TODO(mszostok): implement retry?
 			switch err := err.(type) {
 			case *github.ErrorResponse:
 				if err.Response.StatusCode == http.StatusUnauthorized {
-					return newValidateError("Teams for organization %q could not be queried. Requires GitHub authorization.", v.orgName)
+					return newValidateError("Teams for repository %q could not be queried. Requires GitHub authorization.", v.orgRepoName)
 				}
 				return newValidateError("HTTP error occurred while calling GitHub: %v", err)
 			case *github.RateLimitError:
@@ -197,14 +197,14 @@ func (v *ValidOwner) initOrgListTeams(ctx context.Context) *validateError {
 		req.Page = resp.NextPage
 	}
 
-	v.orgTeams = teams
+	v.repoTeams = teams
 
 	return nil
 }
 
 func (v *ValidOwner) validateTeam(ctx context.Context, name string) *validateError {
-	if v.orgTeams == nil {
-		if err := v.initOrgListTeams(ctx); err != nil {
+	if v.repoTeams == nil {
+		if err := v.initRepoTeams(ctx); err != nil {
 			return err.AsPermanent()
 		}
 	}
@@ -220,74 +220,17 @@ func (v *ValidOwner) validateTeam(ctx context.Context, name string) *validateErr
 		return newValidateError("Team %q does not belong to %q organization.", name, v.orgName)
 	}
 
-	teamExists := func() bool {
-		for _, v := range v.orgTeams {
-			// GitHub normalizes name before comparison
-			if strings.EqualFold(v.GetSlug(), team) {
-				return true
+	for _, t := range v.repoTeams {
+		// GitHub normalizes name before comparison
+		if strings.EqualFold(t.GetSlug(), team) {
+			if t.Permissions["push"] {
+				return nil
 			}
-		}
-		return false
-	}
-
-	if !teamExists() {
-		return newValidateError("Team %q does not exist in organization %q.", name, org)
-	}
-
-	// repo contains the permissions for the team slug given
-	// TODO(mszostok): Switch to GraphQL API, see:
-	//   https://github.com/mszostok/codeowners-validator/pull/62#discussion_r561273525
-	repo, _, err := v.ghClient.Teams.IsTeamRepoBySlug(ctx, v.orgName, team, org, v.orgRepoName)
-	if err != nil { // TODO(mszostok): implement retry?
-		switch err := err.(type) {
-		case *github.ErrorResponse:
-			switch err.Response.StatusCode {
-			case http.StatusUnauthorized:
-				return newValidateError(
-					"Team permissions information for %q/%q could not be queried. Requires GitHub authorization.",
-					org, v.orgRepoName)
-			case http.StatusNotFound:
-				return newValidateError(
-					"Team %q does not have permissions associated with the repository %q.",
-					team, v.orgRepoName)
-			default:
-				return newValidateError("HTTP error occurred while calling GitHub: %v", err)
-			}
-		case *github.RateLimitError:
-			return newValidateError("GitHub rate limit reached: %v", err.Message)
-		default:
-			return newValidateError("Unknown error occurred while calling GitHub: %v", err)
+			return newValidateError("Team %q cannot review PRs on %q as neither it nor any parent team has write permissions.", team, v.orgRepoName)
 		}
 	}
 
-	teamHasWritePermission := func() bool {
-		for k, v := range repo.GetPermissions() {
-			if !v {
-				continue
-			}
-
-			switch k {
-			case
-				"admin",
-				"maintain",
-				"push":
-				return true
-			case
-				"pull",
-				"triage":
-			}
-		}
-
-		return false
-	}
-
-	if !teamHasWritePermission() {
-		return newValidateError(
-			"Team %q cannot review PRs on %q as neither it nor any parent team has write permissions.",
-			team, v.orgRepoName)
-	}
-
-	return nil
+	return newValidateError("Team %q does not exist in organization %q or has no access to repository %q", name, org, v.orgRepoName)
 }
 
 func (v *ValidOwner) validateGitHubUser(ctx context.Context, name string) *validateError {

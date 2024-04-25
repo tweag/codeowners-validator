@@ -44,8 +44,8 @@ type ValidOwnerConfig struct {
 type ValidOwner struct {
 	ghClient             *github.Client
 	checkScopes          bool
-	orgMembers           *map[string]struct{}
 	orgName              string
+	repoUsers            []*github.User
 	repoTeams            []*github.Team
 	orgRepoName          string
 	ignOwners            map[string]struct{}
@@ -234,34 +234,25 @@ func (v *ValidOwner) validateTeam(ctx context.Context, name string) *validateErr
 }
 
 func (v *ValidOwner) validateGitHubUser(ctx context.Context, name string) *validateError {
-	if v.orgMembers == nil { // TODO(mszostok): lazy init, make it more robust.
-		if err := v.initOrgListMembers(ctx); err != nil {
+	if v.repoUsers == nil { // TODO(mszostok): lazy init, make it more robust.
+		if err := v.initRepoUsers(ctx); err != nil {
 			return newValidateError("Cannot initialize organization member list: %v", err).AsPermanent()
 		}
 	}
 
 	userName := strings.TrimPrefix(name, "@")
-	_, _, err := v.ghClient.Users.Get(ctx, userName)
-	if err != nil { // TODO(mszostok): implement retry?
-		switch err := err.(type) {
-		case *github.ErrorResponse:
-			if err.Response.StatusCode == http.StatusNotFound {
-				return newValidateError("User %q does not have github account", name)
+
+	for _, u := range v.repoUsers {
+		// GitHub normalizes name before comparison
+		if strings.EqualFold(u.GetLogin(), userName) {
+			if u.Permissions["push"] {
+				return nil
 			}
-			return newValidateError("HTTP error occurred while calling GitHub: %v", err).AsPermanent()
-		case *github.RateLimitError:
-			return newValidateError("GitHub rate limit reached: %v", err.Message).AsPermanent()
-		default:
-			return newValidateError("Unknown error occurred while calling GitHub: %v", err).AsPermanent()
+			return newValidateError("User %q cannot review PRs on %q as they don't have write permissions.", userName, v.orgRepoName)
 		}
 	}
 
-	_, isMember := (*v.orgMembers)[userName]
-	if !isMember {
-		return newValidateError("User %q is not a member of the organization", name)
-	}
-
-	return nil
+	return newValidateError("User %q is not a member of the organization %q or has no access to repository %q", name, v.orgName, v.orgRepoName)
 }
 
 // There is a method to check if user is a org member
@@ -270,28 +261,25 @@ func (v *ValidOwner) validateGitHubUser(ctx context.Context, name string) *valid
 //
 // But latency is too huge for checking each single user independent
 // better and faster is to ask for all members and cache them.
-func (v *ValidOwner) initOrgListMembers(ctx context.Context) error {
-	opt := &github.ListMembersOptions{
+func (v *ValidOwner) initRepoUsers(ctx context.Context) error {
+	var users []*github.User
+	opt := &github.ListCollaboratorsOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
 
-	var allMembers []*github.User
 	for {
-		users, resp, err := v.ghClient.Organizations.ListMembers(ctx, v.orgName, opt)
+		resultPage, resp, err := v.ghClient.Repositories.ListCollaborators(ctx, v.orgName, v.orgRepoName, opt)
 		if err != nil {
 			return err
 		}
-		allMembers = append(allMembers, users...)
+		users = append(users, resultPage...)
 		if resp.NextPage == 0 {
 			break
 		}
 		opt.Page = resp.NextPage
 	}
 
-	v.orgMembers = &map[string]struct{}{}
-	for _, u := range allMembers {
-		(*v.orgMembers)[u.GetLogin()] = struct{}{}
-	}
+	v.repoUsers = users
 
 	return nil
 }

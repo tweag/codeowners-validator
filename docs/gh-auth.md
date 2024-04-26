@@ -36,7 +36,7 @@ Here are the steps to create a GitHub App and use it for this tool:
 1. [Create a GitHub App](https://docs.github.com/en/developers/apps/building-github-apps/creating-a-github-app).
     > **Note**
     > Your app does not need a callback or a webhook URL.
-2. Add a read-only permission to the "Members" item of organization permissions.
+2. Add a read-only permission to the "Administration" item of repository permissions.
 3. [Install the app in your organization](https://docs.github.com/en/developers/apps/managing-github-apps/installing-github-apps).
 4. Done! To authenticate with your app, you need:
 
